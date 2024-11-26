@@ -1,0 +1,7 @@
+flask==3.1.0
+gevent==24.11.1
+tensorflow==2.18.0
+numpy==1.26.4
+nltk==3.9.1
+gensim==4.3.3
+google-cloud-firestore==2.19.0
