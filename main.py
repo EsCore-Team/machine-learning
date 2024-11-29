@@ -83,11 +83,8 @@ def predict_suggestion(score):
     elif score == 5:
         suggestion = 'Suggestion score 5!'
         return suggestion
-    elif score == 6:
-        suggestion = 'Suggestion score 6!'
-        return suggestion
     else:
-        suggestion = 'Score not detected!'
+        suggestion = 'Suggestion score 6!'
         return suggestion
 
 @app.route('/', methods=['GET'])
@@ -102,18 +99,37 @@ def index():
 @app.route('/predict', methods=['POST'])
 def predict_score():
     try:
-        # data = request.json
-        # essay_text = data.get('essay', '')  # Pastikan key yang digunakan adalah 'essay'
-        
-        user_email = request.form.get('email', '')
+        user_email = request.form.get('user_email', '')
         essay_title = request.form.get('title', '')
         essay_text = request.form.get('essay', '')
         
+        if not user_email:
+            return jsonify({
+                'error': True,
+                'message': 'User email is required!'
+            }), 400
+            
         if not essay_text:
             return jsonify({
                 'error': True,
                 'message': 'Essay text is required!'
             }), 400
+            
+        # Cek apakah user_email ada di collection "users"
+        users_ref = db.collection('users')
+        query = users_ref.where('email', '==', user_email).limit(1)
+        user_docs = query.stream()
+        
+        user_doc = None
+        for doc in user_docs:
+            user_doc = doc
+            break
+        
+        if not user_doc:
+            return jsonify({
+                'error': True,
+                'message': 'User email not found!'
+            }), 404
 
         # Preprocessing teks essay
         processed_input = preprocess_essay(essay_text)
@@ -140,11 +156,13 @@ def predict_score():
             'user_email': user_email
         }
         
-        db.collection("predictions").add(response_data)
+        # Menyimpan hasil prediksi ke dalam sub-collection user
+        user_ref = db.collection('users').document(user_doc.id)
+        user_ref.collection('predictions').add(response_data)
         
         return jsonify(response_data), 200
     except Exception as e:
-        print('Error occurred: %s', str(e))
+        print('Error occurred:', str(e))
         return jsonify({
             'error': True,
             'message': 'An error occurred while processing the request!',
