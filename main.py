@@ -3,89 +3,107 @@ import tensorflow as tf
 import numpy as np
 import re
 import nltk
+import pickle
+import fitz
 from gevent.pywsgi import WSGIServer
 from flask import Flask, request, jsonify
-from google.cloud import firestore
-from tensorflow.keras import saving
-from tensorflow.keras.layers import Layer
-from nltk.tokenize import word_tokenize
-from gensim.models import Word2Vec
+from google.cloud import firestore, storage
+from nltk.corpus import stopwords
 from nltk.data import find
 from datetime import datetime
+from keras.preprocessing.sequence import pad_sequences
 
 try:
     find('tokenizers/punkt')
     find('tokenizers/punkt_tab')
-    print('Punkt ditemukan')
+    find('tokenizers/stopwords')
 except LookupError:
     print('Punkt tidak ditemukan! downloading...')
     nltk.download('punkt')
     nltk.download('punkt_tab')
+    nltk.download('stopwords')
 
 app = Flask(__name__)
 
-db = firestore.Client.from_service_account_json('./firestore.json')
+if not os.path.exists('uploads'):
+    os.makedirs('uploads')
 
-@saving.register_keras_serializable()
-class RescaleOutput(Layer):
-    def __init__(self, **kwargs):
-        super(RescaleOutput, self).__init__(**kwargs)
+db = firestore.Client.from_service_account_json('service.json')
+gcs = storage.Client.from_service_account_json('service.json')
 
-    def call(self, inputs):
-        return inputs * 5 + 1
+class QuadraticWeightedKappa(tf.keras.metrics.Metric):
+    def __init__(self, name='quadratic_weighted_kappa', **kwargs):
+        super(QuadraticWeightedKappa, self).__init__(name=name, **kwargs)
+        self._qwk = self.add_weight(name='qwk', initializer='zeros')
 
-# Load ml model dengan custom_objects
-model = tf.keras.models.load_model('final_model.h5', custom_objects={'RescaleOutput': RescaleOutput})
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(y_true, tf.int32)
+        y_pred = tf.cast(y_pred, tf.int32)
 
-# Load pre-trained Word2Vec model
-model_w2v = Word2Vec.load('word2vec_model.bin')
-VECTOR_SIZE = model_w2v.vector_size
+        qwk_value = tf.numpy_function(self._quadratic_weighted_kappa, (y_true, y_pred), tf.float32)
+        qwk_value.set_shape([])
+        self._qwk.assign(qwk_value)
 
-# Text preprocessing functions
+    def result(self):
+        return self._qwk
+
+    def reset_states(self):
+        self._qwk.assign(0.0)
+
+model = tf.keras.models.load_model('best_model_lstm.h5', custom_objects={'QuadraticWeightedKappa': QuadraticWeightedKappa})
+
+# Muat tokenizer dari file
+with open('tokenizer.pkl', 'rb') as file:
+    tokenizer = pickle.load(file)
+
+# Text preprocessing
 def clean_text(text):
-    text = text.lower()  # Convert to lowercase
-    text = re.sub(r'\s+', ' ', text)  # Remove extra spaces
-    text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
+    text = text.lower()
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\w\s]', '', text)
+    text = re.sub(r'\d+', '', text)
+    text = ' '.join([word for word in text.split() if word not in stopwords.words('english')])
     return text
-
-def get_average_word2vec(tokens_list, model, vector_size):
-    vec = np.zeros(vector_size)
-    valid_words = 0
-    for word in tokens_list:
-        if word in model.wv:
-            vec += model.wv[word]
-            valid_words += 1
-    if valid_words > 0:
-        vec /= valid_words
-    return vec
 
 def preprocess_essay(essay_text):
     cleaned_text = clean_text(essay_text)
-    tokens = word_tokenize(cleaned_text)
-    text_vector = get_average_word2vec(tokens, model_w2v, VECTOR_SIZE)
-    text_vector_3d = np.expand_dims(np.expand_dims(text_vector, axis=0), axis=1)
-    return text_vector_3d
+    sequences = tokenizer.texts_to_sequences([cleaned_text])
+    padded_input = pad_sequences(sequences, maxlen=1024)
+    return padded_input
 
-# Sugesstion
-def predict_suggestion(score):
-    if score == 1:
-        suggestion = 'Suggestion score 1!'
-        return suggestion
-    elif score == 2:
-        suggestion = 'Suggestion score 2!'
-        return suggestion
-    elif score == 3:
-        suggestion = 'Suggestion score 3!'
-        return suggestion
-    elif score == 4:
-        suggestion = 'Suggestion score 4!'
-        return suggestion
-    elif score == 5:
-        suggestion = 'Suggestion score 5!'
-        return suggestion
+def predict_suggestion(rounded_score):
+    suggestions = {
+        1: 'Suggestion score 1!',
+        2: 'Suggestion score 2!',
+        3: 'Suggestion score 3!',
+        4: 'Suggestion score 4!',
+        5: 'Suggestion score 5!',
+        6: 'Suggestion score 6!'
+    }
+    return suggestions.get(rounded_score, 'No suggestions available.')
+
+def extract_text_from_pdf(pdf_file):
+    doc = fitz.open(pdf_file)
+    text = ''
+    for page_num in range(doc.page_count):
+        page = doc.load_page(page_num)
+        page_text = page.get_text('text')
+        text += page_text
+    if text:
+        return text
     else:
-        suggestion = 'Suggestion score 6!'
-        return suggestion
+        return 'No text found in this PDF.'
+
+def upload_to_gcs(bucket_name, file_obj, destination_blob_name):
+    file_obj.stream.seek(0)
+    bucket = gcs.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_file(file_obj.stream, content_type=file_obj.mimetype)
+    
+    public_url = f'https://storage.googleapis.com/{bucket_name}/{destination_blob_name}'
+    print(f'File is publicly accessible at: {public_url}')
+
+    return public_url
 
 @app.route('/', methods=['GET'])
 def index():
@@ -102,65 +120,92 @@ def predict_score():
         user_email = request.form.get('user_email', '')
         essay_title = request.form.get('title', '')
         essay_text = request.form.get('essay', '')
+        pdf_file = request.files.get('pdf_file', '')
         
-        if not user_email:
+        gcs_link = None
+        timestamp = datetime.now().isoformat()+'Z'
+        
+        if not user_email or not essay_title:
             return jsonify({
                 'error': True,
-                'message': 'User email is required!'
+                'message': 'All fields are required!'
             }), 400
-            
-        if not essay_text:
+        
+        if not essay_text and not pdf_file:
             return jsonify({
                 'error': True,
-                'message': 'Essay text is required!'
+                'message': 'Essay text or PDF file is required!'
             }), 400
-            
-        # Cek apakah user_email ada di collection "users"
-        users_ref = db.collection('users')
-        query = users_ref.where('email', '==', user_email).limit(1)
-        user_docs = query.stream()
         
-        user_doc = None
-        for doc in user_docs:
-            user_doc = doc
-            break
-        
+        # Query untuk mencari email di collection "users"
+        user_ref = db.collection('users')
+        query = user_ref.where('email', '==', user_email).limit(1)
+        user_doc = query.get()
+
         if not user_doc:
             return jsonify({
                 'error': True,
                 'message': 'User email not found!'
             }), 404
+        
+        if pdf_file:
+            if not pdf_file.filename.endswith('.pdf'):
+                return jsonify({
+                    'error': True,
+                    'message': 'Uploaded file is not a PDF!'
+                }), 400
+                
+            pdf_path = os.path.join('uploads', pdf_file.filename)
+            pdf_file.save(pdf_path)
+            
+            # Upload ke GCS
+            bucket_name = 'escore-storage'
+            destination_blob_name = f'essays/{timestamp}-{pdf_file.filename}'
+            gcs_link = upload_to_gcs(bucket_name, pdf_file, destination_blob_name)
+            
+            essay_text = extract_text_from_pdf(pdf_path)
 
         # Preprocessing teks essay
         processed_input = preprocess_essay(essay_text)
-        
-        # score
+
+        # Prediction
         prediction = model.predict(processed_input)
-        raw_predicted_score = float(prediction[0][0])
-        rounded_predicted_score = int(np.clip(np.rint(raw_predicted_score), 1, 6))
+        raw_score = float(prediction[0][0])
         
-        suggestion = predict_suggestion(rounded_predicted_score)
-        createdAt = datetime.now().isoformat()+'Z'
+        if raw_score < 1:
+            rounded_score = 1
+        else:
+            rounded_score = int(np.round(raw_score))
+        
+        format_score = f'{rounded_score}/6'
+        suggestion = predict_suggestion(rounded_score)
 
         response_data = {
-            'error': False,
-            'message': 'Essay has been predicted!',
             'title': essay_title,
             'essay': essay_text,
             'predicted_result': {
-                'raw_score': raw_predicted_score,
-                'score': rounded_predicted_score,
+                'raw_score': raw_score,
+                'score': format_score,
                 'suggestion': suggestion
             },
-            'createdAt': createdAt,
-            'user_email': user_email
+            'createdAt': timestamp,
         }
         
-        # Menyimpan hasil prediksi ke dalam sub-collection user
-        user_ref = db.collection('users').document(user_doc.id)
+        if gcs_link:
+            response_data['gcsLink'] = gcs_link
+        
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+        
+        # Save predict result
+        user_ref = db.collection('users').document(user_doc[0].reference.id)
         user_ref.collection('predictions').add(response_data)
         
-        return jsonify(response_data), 200
+        return jsonify({
+            'error': False,
+            'message': 'Essay has been predicted!',
+            'result': response_data
+        }), 200
     except Exception as e:
         print('Error occurred:', str(e))
         return jsonify({
@@ -172,5 +217,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     host = os.environ.get('HOST', 'localhost')
     http_server = WSGIServer((host, port), app)
-    print(f"Server is Ready on {host}:{port}")
+    print(f'Server is Ready on {host}:{port}')
     http_server.serve_forever()
