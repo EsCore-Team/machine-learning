@@ -5,6 +5,7 @@ import re
 import nltk
 import pickle
 import fitz
+import vertexai
 from gevent.pywsgi import WSGIServer
 from flask import Flask, request, jsonify
 from google.cloud import firestore, storage
@@ -12,6 +13,7 @@ from nltk.corpus import stopwords
 from nltk.data import find
 from datetime import datetime
 from keras.preprocessing.sequence import pad_sequences
+from vertexai.generative_models import GenerativeModel
 
 try:
     find('tokenizers/punkt')
@@ -30,6 +32,7 @@ if not os.path.exists('uploads'):
 
 db = firestore.Client.from_service_account_json('service.json')
 gcs = storage.Client.from_service_account_json('service.json')
+vertexai.init(project="escore-app", location="asia-southeast1")
 
 class QuadraticWeightedKappa(tf.keras.metrics.Metric):
     def __init__(self, name='quadratic_weighted_kappa', **kwargs):
@@ -71,17 +74,6 @@ def preprocess_essay(essay_text):
     padded_input = pad_sequences(sequences, maxlen=1024)
     return padded_input
 
-def predict_suggestion(rounded_score):
-    suggestions = {
-        1: 'Suggestion score 1!',
-        2: 'Suggestion score 2!',
-        3: 'Suggestion score 3!',
-        4: 'Suggestion score 4!',
-        5: 'Suggestion score 5!',
-        6: 'Suggestion score 6!'
-    }
-    return suggestions.get(rounded_score, 'No suggestions available.')
-
 def extract_text_from_pdf(pdf_file):
     doc = fitz.open(pdf_file)
     text = ''
@@ -105,6 +97,31 @@ def upload_to_gcs(bucket_name, file_obj, destination_blob_name):
 
     return public_url
 
+# Geberate suggestion using vertex ai
+def generate_suggestion(score, essay_text):
+    try:
+        instruction = f"""
+        You are EsCore, an AI assistant. Analyze the given essay text and provide constructive feedback based on its quality.
+        The score is {score}/6.
+        Limit your response to 100 words.
+        Keep the tone supportive and encouraging, focusing only on feedback without asking for additional input.
+        """
+        
+        model = GenerativeModel("gemini-1.5-flash-002", system_instruction=instruction)
+        chat = model.start_chat()
+        response = chat.send_message(
+            f"Essay: {essay_text}\n Score: {score}\n Please provide feedback.",
+            generation_config={
+                "max_output_tokens": 1024,
+                "temperature": 1,
+                "top_p": 0.95,
+            }
+        )
+        return response.text
+    except Exception as e:
+        print("Error with Vertex AI:", str(e))
+        return "Error generating suggestion."
+
 @app.route('/', methods=['GET'])
 def index():
     hello_json = {
@@ -123,6 +140,7 @@ def predict_score():
         pdf_file = request.files.get('pdf_file', '')
         
         gcs_link = None
+        pdf_path = ""
         timestamp = datetime.now().isoformat()+'Z'
         
         if not user_email or not essay_title:
@@ -178,7 +196,7 @@ def predict_score():
             rounded_score = int(np.round(raw_score))
         
         format_score = f'{rounded_score}/6'
-        suggestion = predict_suggestion(rounded_score)
+        suggestion = generate_suggestion(rounded_score, essay_text)
 
         response_data = {
             'title': essay_title,
@@ -192,7 +210,7 @@ def predict_score():
         }
         
         if gcs_link:
-            response_data['gcsLink'] = gcs_link
+            response_data['gcs_link'] = gcs_link
         
         if os.path.exists(pdf_path):
             os.remove(pdf_path)
@@ -204,6 +222,7 @@ def predict_score():
         return jsonify({
             'error': False,
             'message': 'Essay has been predicted!',
+            'user_email': user_email,
             'result': response_data
         }), 200
     except Exception as e:
@@ -212,6 +231,7 @@ def predict_score():
             'error': True,
             'message': 'An error occurred while processing the request!',
         }), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
