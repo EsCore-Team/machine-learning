@@ -13,7 +13,7 @@ from nltk.corpus import stopwords
 from nltk.data import find
 from datetime import datetime
 from keras.preprocessing.sequence import pad_sequences
-from vertexai.generative_models import GenerativeModel
+from suggestion import generate_suggestion
 
 try:
     find('tokenizers/punkt')
@@ -96,31 +96,6 @@ def upload_to_gcs(bucket_name, file_obj, destination_blob_name):
     print(f'File is publicly accessible at: {public_url}')
 
     return public_url
-
-# Geberate suggestion using vertex ai
-def generate_suggestion(score, essay_text):
-    try:
-        instruction = f"""
-        You are EsCore, an AI assistant. Analyze the given essay text and provide constructive feedback based on its quality.
-        The score is {score}/6.
-        Limit your response to 100 words.
-        Keep the tone supportive and encouraging, focusing only on feedback without asking for additional input.
-        """
-        
-        model = GenerativeModel("gemini-1.5-flash-002", system_instruction=instruction)
-        chat = model.start_chat()
-        response = chat.send_message(
-            f"Essay: {essay_text}\n Score: {score}\n Please provide feedback.",
-            generation_config={
-                "max_output_tokens": 1024,
-                "temperature": 1,
-                "top_p": 0.95,
-            }
-        )
-        return response.text
-    except Exception as e:
-        print("Error with Vertex AI:", str(e))
-        return "Error generating suggestion."
 
 @app.route('/', methods=['GET'])
 def index():
