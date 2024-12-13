@@ -33,9 +33,11 @@ def generate_suggestion(score, essay_text):
         SCORE 6:
         An essay in this category demonstrates clear and consistent mastery, although it may have a few minor errors. A typical essay effectively and insightfully develops a point of view on the issue and demonstrates outstanding critical thinking; the essay uses clearly appropriate examples, reasons, and other evidence taken from the source text(s) to support its position, the essay is well organized and clearly focused, demonstrating clear coherence and smooth progression of ideas; the essay exhibits skillful use of language, using a varied, accurate, and apt vocabulary and demonstrates meaningful variety in sentence structure; the essay is free of most errors in grammar, usage, and mechanics.
         
-        Limit your response to 150 words.
+        Please provide in number point form each suggestion, remove bold, and each description of the point in the next paragraph.
         
         Keep the tone supportive and encouraging, focusing only on feedback without asking for additional input.
+        
+        Limit your response to 3 point and 150 words.
         """
         
         model = GenerativeModel("gemini-1.5-flash-002", system_instruction=instruction)
